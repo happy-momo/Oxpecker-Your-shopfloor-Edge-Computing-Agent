@@ -227,6 +227,12 @@ class AdviserConfig:
     monitor_interval_s: float = 60.0
     deep_report_cron: str = "0 6 * * *"  # daily 6am deep report
     learn_cron: str = "0 3 * * *"        # daily 3am history learning
+    # v0.7: retrospective evaluation loop (measures whether the learned
+    # knowledge actually improves answers). Empty string = disabled (default):
+    # the loop costs local-model calls daily, so it must be opted into.
+    eval_cron: str = ""                  # e.g. "0 4 * * *" — after learn (3am)
+    eval_cases_per_asset: int = 5        # stratified sample size per pass
+    eval_reviewer_role: str = "routine"  # reviewer model role (local by default)
 
     # context budget for offline model routing
     history_top_k: int = 6

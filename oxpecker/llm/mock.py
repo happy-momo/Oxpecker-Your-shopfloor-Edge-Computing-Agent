@@ -23,7 +23,10 @@ from ..config.model import AdviserConfig, ModelRole
 from .gateway import LLMResult
 
 # session_key → mode (mirrors llm.providers.asset_session)
-_MODE_RE = re.compile(r"asset:[^:]+:(report|qa|learn|monitor)")
+_MODE_RE = re.compile(r"asset:[^:]+:(report|qa|learn|monitor|eval)")
+# the eval loop's reviewer session keys ("eval:reviewer[:asset]") demand a
+# verdict-shaped JSON, not a Q&A answer
+_REVIEWER_RE = re.compile(r"^eval:reviewer")
 
 
 class MockGateway:
@@ -95,6 +98,24 @@ class MockGateway:
         asset_name = _asset_name(asset_md)
         mode_m = _MODE_RE.search(session_key or "")
         mode = mode_m.group(1) if mode_m else "qa"
+
+        # eval reviewer: score against the reference material in the prompt.
+        # The mock always agrees ("correct") unless the prompt itself asks for
+        # the failure rehearsal — verdict vocabulary mirrors eval.reviewer.
+        if _REVIEWER_RE.match(session_key or ""):
+            verdict = "unknown" if "unjudgeable" in prompt else "correct"
+            content = json.dumps(
+                {"verdict": verdict, "reason": "mock review"},
+                ensure_ascii=False)
+            parsed: Any = None
+            try:
+                parsed = json.loads(content)
+            except json.JSONDecodeError:
+                parsed = None
+            return LLMResult(content=content, used_provider="mock-offline",
+                             used_role=role, degraded=False,
+                             usage={"mock_tokens": len(content) // 4},
+                             parsed_json=parsed)
 
         if mode == "report":
             content = _report_md(asset_name or "设备", snapshot)

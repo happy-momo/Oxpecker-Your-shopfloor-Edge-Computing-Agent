@@ -42,12 +42,14 @@ class ScheduleState:
     last_monitor: float = 0.0
     last_deep: float = 0.0
     last_learn: float = 0.0
+    last_eval: float = 0.0
     next_learn_ok: bool = False
     consecutive_empty: int = 0  # N4: how many back-to-back empty windows
     # cron slot bookkeeping: the last minute-slot each cron job fired in, so a
     # job runs at most once per matching slot even across multiple ticks
     last_deep_slot: Any = None
     last_learn_slot: Any = None
+    last_eval_slot: Any = None  # v0.7: retrospective evaluation loop
 
 
 @dataclass
@@ -61,6 +63,8 @@ class Supervisor:
     # N9: regime label injected by the caller (replaces the hardcoded "degrade").
     default_regime: str | None = None
     credential_lookup: Callable[[str], dict[str, str]] | None = None
+    # v0.7: retrospective evaluation loop (optional; None = not wired).
+    eval_engine: Any = None
     _sources: dict[str, DataSource] = field(default_factory=dict)
     _state: dict[str, ScheduleState] = field(default_factory=dict)
     # per-asset job mutex: a manual run-now/report/learn must not execute the
@@ -371,10 +375,27 @@ class Supervisor:
             logger.error("learn failed for {a}: {e}", a=asset.asset_id, e=exc)
             log_run_event(self.store, asset.asset_id, "learn", "exception",
                           reason=str(exc)[:200])
+        fired_eval = False
+        try:
+            # v0.7: retrospective evaluation loop — same cron/slot discipline as
+            # deep-report/learn. Disabled by empty eval_cron or an unwired engine.
+            if self.eval_engine is not None and self.config.eval_cron and \
+                    cron_matches(self.config.eval_cron, now) and \
+                    (st.last_eval_slot is None or st.last_eval_slot < slot):
+                st.last_eval_slot = slot
+                fired_eval = True
+                await self.eval_engine.eval_all(
+                    seed_key=now.strftime("%Y-%m-%d"), asset_filter=asset.asset_id)
+        except Exception as exc:  # noqa: BLE001 — cron jobs must not kill the loop
+            logger.error("eval failed for {a}: {e}", a=asset.asset_id, e=exc)
+            log_run_event(self.store, asset.asset_id, "eval", "exception",
+                          reason=str(exc)[:200])
         if fired_deep:
             st.last_deep = time.time()
         if fired_learn:
             st.last_learn = time.time()
+        if fired_eval:
+            st.last_eval = time.time()
 
 
 async def _main(supervisor: Supervisor) -> None:

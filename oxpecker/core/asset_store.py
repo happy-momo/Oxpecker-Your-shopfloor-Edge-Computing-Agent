@@ -73,6 +73,29 @@ class AssetStore:
         """Path to the append-only audit ledger for an asset (sibling of reports/)."""
         return self.asset_dir(asset_id) / "runlog.jsonl"
 
+    def alerts_path(self, asset_id: str) -> Path:
+        """Append-only alert ledger (written by the alert emitter / web loop)."""
+        return self.asset_dir(asset_id) / "alerts.jsonl"
+
+    def read_alerts(self, asset_id: str) -> list[dict[str, Any]]:
+        """All alert records for an asset, oldest first (acked flag included)."""
+        p = self.alerts_path(asset_id)
+        if not p.exists():
+            return []
+        out: list[dict[str, Any]] = []
+        try:
+            for line in p.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    out.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+        except OSError:
+            return []
+        return out
+
     # ------------------------------------------------------------------ #
     # asset metadata
     # ------------------------------------------------------------------ #

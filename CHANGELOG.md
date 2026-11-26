@@ -4,6 +4,34 @@
 
 ---
 
+## 0.7.0 — 2026-11-26（回顾式评估环：让"越用越准"可度量）
+
+学习闭环的最后一环补齐：每日自动评估"当前知识库能否让回答更准"，产出准确率时间序列。设计文档 `docs/specs/2026-11-26-retrospective-eval-loop-design.md`。后端测试 221 → **254**。
+
+### 新模块 `oxpecker/eval/`
+
+- **确定性采样器**（`eval/sampler.py`）：从每资产快照归档分层抽样（≥2 incident + ≥2 nominal），种子 = sha256(asset_id+日期)——同日重跑可复现；候选 <3 跳过资产不硬凑题目；空窗/损坏快照自动排除。
+- **LLM 评审员**（`eval/reviewer.py`）：真值材料包全部确定性提取（快照确定性结论 + ±15min 同期告警 + 24h 内后续反馈）；评审员盲于知识库与答题模型身份（防串通）；verdict 四值（correct/partial/wrong/unknown），解析失败诚实记 unknown。
+- **评估引擎**（`eval/engine.py`）：编排采样→答题（复用 QA context 路径，注入指定历史快照）→评审→`evals.jsonl` 台账落盘（tmp+os.replace 原子写，2000 行滚动保留）。unknown 剔除出准确率分母——诚实失败不虚增不虚减。
+
+### 集成
+
+- **配置**（默认关闭，显式开启）：`eval_cron`（空=禁用；建议 `"0 4 * * *"` 排在 learn 之后）、`eval_cases_per_asset`（默认 5）、`eval_reviewer_role`（默认 routine 全本地，零 API 成本）。
+- **Supervisor**：`run_due_jobs` eval 分支与 deep_report/learn 同构（cron 匹配 + slot 去重 + 异常隔离落 runlog `kind="eval"`）。
+- **CLI**：`oxpecker eval config.json [asset]` 手动跑一次评估 pass。
+- **`/api/stats` 新增 `evaluation` 区块**：当前准确率、最近一次通过、7 天趋势（按 UTC 日聚合 `{date, n, correct, partial, wrong, accuracy}`）、分资产分数、verdict 计数。未启用返回 `{"enabled": false}`，启用无数据返回 null——不伪造分数。
+
+### 重构
+
+- `QAEngine` 提取 `ask_with_snapshot(asset, question, snapshot)` 共用方法：交互问答（最新快照）与评估环（抽中历史快照）走同一条 context 构建路径，行为不变（63 个既有 QA/流程测试守护）。
+- `AssetStore` 新增 `read_alerts()`/`alerts_path()`：告警台账读取与 read_feedback 同模式（此前只有 server 层散落的读取实现）。
+
+### 已知取舍
+
+- 评审员同为 LLM（routine role），理论上评审也会错——缓解：评审 prompt 只对照确定性真值材料、输出受约束 JSON、非法值一律降为 unknown；未来可切换 online 强模型评审（`eval_reviewer_role` 已预留）。
+
+---
+
 ## 0.6.0 — 2026-11-26（演进包：部署硬化 + 任务持久化 + 可观测性 + 导出）
 
 P0→P2 演进计划落地（计划文档 `docs/specs/2026-11-26-oxpecker-0.6.0-evolution-plan.md`）。后端测试 194 → **221**，前端 4 → **12**。

@@ -102,6 +102,65 @@ def _mtta_s(rows: list[dict[str, Any]]) -> float | None:
     return round(sum(gaps) / len(gaps), 1) if gaps else None
 
 
+# --------------------------------------------------------------------------- #
+# v0.7: retrospective evaluation stats
+# --------------------------------------------------------------------------- #
+def _eval_accuracy(rows: list[dict[str, Any]]) -> float | None:
+    """Weighted accuracy; unknown (failed reviews) excluded from the denominator."""
+    scores = {"correct": 1.0, "partial": 0.5, "wrong": 0.0}
+    vals = [scores[r["verdict"]] for r in rows if r.get("verdict") in scores]
+    return round(sum(vals) / len(vals), 3) if vals else None
+
+
+def _evaluation_stats(state: "AppState") -> dict[str, Any]:
+    """Accuracy of the learned knowledge, from the eval ledgers on disk."""
+    if not state.config.eval_cron:
+        # loop off: present but explicitly disabled, not merely empty
+        return {"enabled": False}
+    per_asset: dict[str, Any] = {}
+    all_rows: list[dict[str, Any]] = []
+    by_day: dict[str, list[dict[str, Any]]] = {}
+    verdict_counts: Counter[str] = Counter()
+    for asset in state.config.assets:
+        rows = _read_jsonl(state.store.asset_dir(asset.asset_id) / "evals.jsonl")
+        if not rows:
+            continue
+        all_rows.extend(rows)
+        acc = _eval_accuracy(rows)
+        per_asset[asset.asset_id] = {
+            "n": len(rows),
+            "accuracy": acc,
+        }
+        for r in rows:
+            verdict_counts[r.get("verdict") or "unknown"] += 1
+            ts = r.get("ts")
+            if isinstance(ts, (int, float)):
+                day = datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d")
+                by_day.setdefault(day, []).append(r)
+    if not all_rows:
+        return {"enabled": True, "last_run_ts": None, "last_run_accuracy": None,
+                "accuracy_7d": [], "per_asset": {}, "verdict_counts": {}}
+    # 7-day trend, oldest first, one point per UTC day that has data
+    accuracy_7d = [
+        {"date": day, "n": len(rows),
+         "correct": sum(1 for r in rows if r.get("verdict") == "correct"),
+         "partial": sum(1 for r in rows if r.get("verdict") == "partial"),
+         "wrong": sum(1 for r in rows if r.get("verdict") == "wrong"),
+         "accuracy": _eval_accuracy(rows)}
+        for day, rows in sorted(by_day.items())[-7:]
+    ]
+    return {
+        "enabled": True,
+        "last_run_ts": max(r.get("ts") or 0 for r in all_rows) or None,
+        "last_run_accuracy": _eval_accuracy(
+            [r for r in all_rows
+             if r.get("ts") == max(x.get("ts") or 0 for x in all_rows)]),
+        "accuracy_7d": accuracy_7d,
+        "per_asset": per_asset,
+        "verdict_counts": dict(verdict_counts),
+    }
+
+
 @router.get("/stats")
 async def fleet_stats(request: Request) -> Any:
     state: AppState = await _state(request)
@@ -148,6 +207,7 @@ async def fleet_stats(request: Request) -> Any:
             "unacked": sum(1 for a in all_alerts if not a.get("acked")),
             "mtta_s": _mtta_s(all_alerts),
         },
+        "evaluation": _evaluation_stats(state),
         "activity": dict(per_kind.most_common(20)),
         "storage": {
             "workspace_bytes": total_bytes,

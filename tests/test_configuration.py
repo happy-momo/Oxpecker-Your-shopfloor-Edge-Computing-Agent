@@ -472,3 +472,37 @@ def test_opcua_configuration_and_live_connection_test(
         },
     }
     assert client.post("/api/assets", json=invalid, headers=headers).status_code == 400
+
+
+# --------------------------------------------------------------------------- #
+# v0.7 retrospective evaluation loop config fields
+# --------------------------------------------------------------------------- #
+def test_eval_config_fields_load_and_default(tmp_path: Path) -> None:
+    from oxpecker.config.loader import load_config
+
+    # explicit values are loaded verbatim
+    p = tmp_path / "config.json"
+    p.write_text(json.dumps({
+        "workspace": str(tmp_path / "ws"),
+        "assets": [],
+        "sources": [],
+        "eval_cron": "0 4 * * *",
+        "eval_cases_per_asset": 8,
+        "eval_reviewer_role": "online",
+    }), encoding="utf-8")
+    c = load_config(p)
+    assert c.eval_cron == "0 4 * * *"
+    assert c.eval_cases_per_asset == 8
+    assert c.eval_reviewer_role == "online"
+
+    # legacy config without the fields: disabled-by-default, no migration
+    p2 = tmp_path / "legacy.json"
+    p2.write_text(json.dumps({
+        "workspace": str(tmp_path / "ws2"),
+        "assets": [],
+        "sources": [],
+    }), encoding="utf-8")
+    c2 = load_config(p2)
+    assert c2.eval_cron == ""          # empty = loop off
+    assert c2.eval_cases_per_asset == 5
+    assert c2.eval_reviewer_role == "routine"

@@ -67,14 +67,20 @@ def _build(config_path: str | Path) -> "Context":
     learner = Learner(config, store, gateway)
     qa = QAEngine(config, store, gateway)
     feedback = FeedbackService(store)
+    # v0.7: retrospective evaluation loop (engine wired unconditionally; the
+    # cron gate in run_due_jobs + CLI decide when it actually runs)
+    from .eval.engine import EvalEngine
+    eval_engine = EvalEngine(config, store, gateway,
+                             reviewer_role=config.eval_reviewer_role)
     return _Context(
         config, store, gateway, report_gen, learner, qa, feedback, credential_vault,
+        eval_engine,
     )
 
 
 class _Context:
     def __init__(self, config, store, gateway, report_gen, learner, qa, feedback,
-                 credential_vault):
+                 credential_vault, eval_engine=None):
         self.config = config
         self.store = store
         self.gateway = gateway
@@ -83,6 +89,7 @@ class _Context:
         self.qa = qa
         self.feedback = feedback
         self.credential_vault = credential_vault
+        self.eval_engine = eval_engine
 
 
 async def _cmd_setup(c: _Context) -> None:
@@ -125,6 +132,7 @@ def _supervisor(c: _Context) -> Supervisor:
         # N9: pass the configured analysis-regime label (no hardcoded "degrade").
         default_regime=c.config.analysis_regime,
         credential_lookup=c.credential_vault.get,
+        eval_engine=c.eval_engine,
     )
 
 
@@ -165,6 +173,25 @@ async def _cmd_learn(c: _Context, asset_id: str | None) -> None:
             print(f"[learn] {asset.asset_id}: {res.content[:200].strip() or res.error}")
     finally:
         await sup.stop()
+
+
+async def _cmd_eval(c: _Context, asset_id: str | None) -> None:
+    """One retrospective evaluation pass (debug/demo; production runs on cron)."""
+    if c.eval_engine is None:
+        raise SystemExit("eval engine not wired")
+    await c.gateway.astart()
+    try:
+        summary = await c.eval_engine.eval_all(asset_filter=asset_id)
+    finally:
+        await c.gateway.aclose()
+    for asset_id_, s in summary["per_asset"].items():
+        if s.get("skipped"):
+            print(f"[eval] {asset_id_}: skipped — {s.get('reason')}")
+        else:
+            print(f"[eval] {asset_id_}: n={s['n']} accuracy={s['accuracy']} "
+                  f"verdicts={s['verdicts']}")
+    print(f"[eval] overall: accuracy={summary['accuracy']} "
+          f"(seed_key={summary['seed_key']})")
 
 
 async def _cmd_ask(c: _Context, asset_id: str, question: str) -> None:
@@ -278,6 +305,8 @@ def main(argv: list[str] | None = None) -> int:
     p = add("monitor", "routine status"); p.add_argument("asset")
     p = add("report", "deep report"); p.add_argument("asset")
     p = add("learn", "learn pass"); p.add_argument("asset", nargs="?")
+    p = add("eval", "one retrospective evaluation pass (scores the learned knowledge)")
+    p.add_argument("asset", nargs="?")
     p = add("ask", "Q&A"); p.add_argument("asset"); p.add_argument("question")
     p = add("feedback", "record feedback"); p.add_argument("asset"); p.add_argument("note")
     add("serve", "run supervisor loop")
@@ -301,6 +330,8 @@ def main(argv: list[str] | None = None) -> int:
             await _cmd_report(c, args.asset)
         elif args.cmd == "learn":
             await _cmd_learn(c, getattr(args, "asset", None))
+        elif args.cmd == "eval":
+            await _cmd_eval(c, getattr(args, "asset", None))
         elif args.cmd == "ask":
             await _cmd_ask(c, args.asset, args.question)
         elif args.cmd == "feedback":

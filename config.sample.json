@@ -3,6 +3,9 @@
   "monitor_interval_s": 30,
   "deep_report_cron": "0 6 * * *",
   "learn_cron": "0 3 * * *",
+  "eval_cron": "0 4 * * *",
+  "eval_cases_per_asset": 5,
+  "eval_reviewer_role": "routine",
   "defaults": {
     "config_path": "nanobot.runtime.json"
   },

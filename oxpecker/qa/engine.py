@@ -55,8 +55,6 @@ class QAEngine:
         of letting the model fabricate from an empty snapshot block. Pass
         allow_stale=True to suppress the gate (e.g. for manual debugging).
         """
-        from ..llm.context import ContextBuilder
-
         gate = gate_snapshot_for_read(self.store, asset, self.config)
         if not gate.ok and not allow_stale:
             return LLMResult(
@@ -64,6 +62,20 @@ class QAEngine:
                 error=f"no_fresh_snapshot: {gate.reason}",
             )
         snapshot = gate.snapshot or self._latest_snapshot(asset.asset_id)
+        return await self.ask_with_snapshot(asset, question, snapshot, role=role)
+
+    async def ask_with_snapshot(self, asset: AssetSpec, question: str,
+                                snapshot: dict[str, Any] | None,
+                                *, role: ModelRole = ModelRole.ROUTINE,
+                                session_mode: str = "qa") -> LLMResult:
+        """Build context for a *specific* snapshot and ask the model.
+
+        The shared entry point for interactive QA (latest snapshot, after the
+        read gate) and the retrospective evaluation loop (a sampled historical
+        snapshot). Attaches the snapshot's provenance to the result so any UI
+        badge reflects the data the answer was actually built from.
+        """
+        from ..llm.context import ContextBuilder
 
         builder = ContextBuilder(self.config, self.store)
         blocks: list[Any] = []
@@ -88,7 +100,7 @@ class QAEngine:
         result = await self.gateway.run(
             prompt,
             role=role,
-            session_key=asset_session(asset.asset_id, "qa"),
+            session_key=asset_session(asset.asset_id, session_mode),
             blocks=blocks,
         )
         # attach the provenance of the snapshot this answer was built from so
