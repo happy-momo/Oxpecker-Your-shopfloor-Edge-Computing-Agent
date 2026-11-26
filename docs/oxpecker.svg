@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 180" role="img" aria-label="Oxpecker logo: a bird perched on a rhino silhouette, watching">
+  <title>Oxpecker — the bird that rides the rhino and warns it</title>
+  <!-- deep-space background disc -->
+  <circle cx="120" cy="90" r="86" fill="#060b14"/>
+  <circle cx="120" cy="90" r="86" fill="none" stroke="#0e2030" stroke-width="1.5"/>
+
+  <!-- rhino: massive, silent, at rest — the machine -->
+  <g fill="#16303f">
+    <path d="M36 148
+             L36 128
+             Q36 108 58 104
+             L108 96
+             Q130 92 152 102
+             L186 116
+             Q204 124 206 138
+             L206 148 Z"/>
+    <path d="M206 128 Q216 122 224 126 L224 134 Q214 138 206 134 Z"/>
+    <path d="M74 148 L74 158 L84 158 L84 148 Z"/>
+    <path d="M170 148 L170 158 L180 158 L180 148 Z"/>
+  </g>
+
+  <!-- the oxpecker: small, alert, cyan — the watcher -->
+  <g fill="none" stroke="#22d3ce" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+    <!-- body -->
+    <path d="M96 88 Q108 74 126 78 Q140 82 144 94 Q146 102 138 106 L110 106 Q98 104 96 88 Z" fill="#0b1e28"/>
+    <!-- head + alert eye -->
+    <circle cx="137" cy="76" r="9" fill="#0b1e28"/>
+    <circle cx="139.5" cy="74" r="2" fill="#22d3ce"/>
+    <!-- long warning beak -->
+    <path d="M145 74 L164 70" stroke-width="3.5"/>
+    <!-- tail up (alert posture) -->
+    <path d="M98 84 L84 72" stroke-width="3.5"/>
+    <!-- legs gripping the rhino's back -->
+    <path d="M112 106 L112 116 M126 106 L126 116" stroke-width="2.5"/>
+  </g>
+
+  <!-- sonar ring: the warning cry -->
+  <g stroke="#22d3ce" opacity="0.55" fill="none">
+    <path d="M166 62 Q172 70 166 78" stroke-width="2"/>
+    <path d="M174 56 Q182 70 174 84" stroke-width="2" opacity="0.6"/>
+    <path d="M182 50 Q192 70 182 90" stroke-width="2" opacity="0.3"/>
+  </g>
+
+  <!-- wordmark -->
+  <text x="120" y="172" text-anchor="middle" font-family="ui-monospace, monospace" font-size="15" letter-spacing="6" fill="#22d3ce">OXPECKER</text>
+</svg>

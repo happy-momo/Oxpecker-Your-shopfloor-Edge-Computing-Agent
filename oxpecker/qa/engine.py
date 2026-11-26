@@ -1,0 +1,103 @@
+"""QAEngine — answer "what is the status of my asset right now?" as a chat.
+
+Retrieves the asset snapshot (most recent), asset profile, and learned knowledge,
+then asks the model to answer from those facts. Runs with the configured role
+(default routine → cheap/local; falls back to online automatically).
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from ..config.model import AdviserConfig, AssetSpec, ModelRole
+from ..analytics.gates import gate_snapshot_for_read
+from ..core.asset_store import AssetStore
+from ..llm.gateway import LLMGateway, LLMResult
+from ..llm.providers import asset_session
+
+_QA_SYSTEM = """You are an industrial equipment advisor. A user asks about the status
+of a piece of equipment. Use ONLY the provided snapshot and knowledge; do not
+invent numbers. Answer in the user's language, be concise but technical, and if
+the user asks for a recommendation, give a prioritized action list grounded in
+the data.
+"""
+
+_QA_PROMPT = """Question: {question}
+
+Use the asset profile, current analytics snapshot, and historical knowledge above
+to answer.
+"""
+
+
+class QAEngine:
+    def __init__(self, config: AdviserConfig, store: AssetStore, gateway: LLMGateway):
+        self.config = config
+        self.store = store
+        self.gateway = gateway
+
+    def _latest_snapshot(self, asset_id: str) -> dict[str, Any] | None:
+        files = self.store.list_snapshots(asset_id, limit=1)
+        if not files:
+            return None
+        try:
+            import json
+            return json.loads(files[0].read_text(encoding="utf-8"))
+        except Exception:
+            return None
+
+    async def ask(self, asset: AssetSpec, question: str,
+                  *, role: ModelRole = ModelRole.ROUTINE,
+                  allow_stale: bool = False) -> LLMResult:
+        """Answer a free-form question about an asset.
+
+        Gated on a fresh snapshot: without one (or one that is stale), we REFUSE
+        to drive the model and return a deterministic "no data to assess" instead
+        of letting the model fabricate from an empty snapshot block. Pass
+        allow_stale=True to suppress the gate (e.g. for manual debugging).
+        """
+        from ..llm.context import ContextBuilder
+
+        gate = gate_snapshot_for_read(self.store, asset, self.config)
+        if not gate.ok and not allow_stale:
+            return LLMResult(
+                content=f"无数据可评估：该资产当前无有效快照（{gate.reason}）。",
+                error=f"no_fresh_snapshot: {gate.reason}",
+            )
+        snapshot = gate.snapshot or self._latest_snapshot(asset.asset_id)
+
+        builder = ContextBuilder(self.config, self.store)
+        blocks: list[Any] = []
+        ab = builder.build_asset_block(asset)
+        if ab:
+            blocks.append(ab)
+        if snapshot:
+            blocks.append(builder.build_snapshot_block(snapshot))
+        kb = builder.build_knowledge_block(asset.asset_id, query=question)
+        if kb:
+            blocks.append(kb)
+        pc = builder.build_prev_conclusion_block(asset.asset_id)
+        if pc:
+            blocks.append(pc)
+        # disclose known superseded/contradicted knowledge so the answer can
+        # caveat it instead of silently repeating a flagged conclusion
+        cb = builder.build_conflict_block(asset.asset_id)
+        if cb:
+            blocks.append(cb)
+
+        prompt = _QA_SYSTEM + "\n\n" + _QA_PROMPT.format(question=question)
+        result = await self.gateway.run(
+            prompt,
+            role=role,
+            session_key=asset_session(asset.asset_id, "qa"),
+            blocks=blocks,
+        )
+        # attach the provenance of the snapshot this answer was built from so
+        # the HMI badge reflects the data actually used, not live telemetry
+        if snapshot:
+            result.snapshot_meta = {
+                "window_end": snapshot.get("window_end", ""),
+                "trust": snapshot.get("trust", ""),
+                "status": snapshot.get("status", ""),
+                "overall_level": snapshot.get("overall_level", ""),
+            }
+        return result

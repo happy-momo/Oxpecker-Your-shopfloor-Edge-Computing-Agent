@@ -1,0 +1,32 @@
+# Runtime data — regenerable from sources
+workspace/
+workspace-demo/
+sessions/
+__pycache__/
+*.pyc
+
+# Test scratch dirs (only a few fallback paths; pytest's tmp_path auto-cleans)
+tests/_tmp_*
+
+# Frontend build artifacts + deps (rebuilt via `cd hmi && npm install && npm run build`)
+hmi/node_modules/
+hmi/dist/
+
+# Vite / dev caches
+hmi/.vite/
+hmi/*.local
+hmi/*.log
+
+# Editor / OS noise
+.idea/
+.vscode/
+*.swp
+*.swo
+Thumbs.db
+.DS_Store
+
+# HMI per-asset runtime sidecar produced by the alert loop
+workspace/**/alerts.jsonl
+
+# Keep the reference workspace knowledge-assets if you want them versioned;
+# remove the `workspace/` line above to track ASSET.md / MEMORY.md / reports.

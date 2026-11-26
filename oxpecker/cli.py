@@ -1,0 +1,323 @@
+"""Oxpecker CLI — operate the edge deployment from a terminal.
+
+Commands:
+    oxpecker setup <config>          validate config & materialize ASSET.md
+    oxpecker run <config> --once     pull+analyze+archive one window
+    oxpecker monitor <config>        routine local-model status for all assets
+    oxpecker report <config> <asset> deep report (online, degrades to local)
+    oxpecker learn <config> [asset]  run the historical-learning pass
+    oxpecker ask <config> <asset> "<question>"   Q&A style status query
+    oxpecker feedback <config> <asset> "<note>"  record operator feedback
+    oxpecker serve <config>          run the long-lived supervisor loop
+    oxpecker web <config> [--host H] [--port P]   serve the B/S HMI (FastAPI)
+
+Uses the same nanobot config/workspace wiring as the SDK.
+
+`web` serves the human-machine interface: a FastAPI backend (REST /api + SSE
+/stream) plus the built Vue SPA. Build the frontend first:
+    cd hmi && npm install && npm run build
+Then `oxpecker web <config>` (default http://0.0.0.0:8000/).
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import sys
+from pathlib import Path
+
+from .config import load_config
+from .core import AssetStore
+from .core.asset_store import create_asset_memory_store  # reused pattern
+from .core.credential_vault import CredentialVault
+from .core.scheduler import Supervisor
+from .ingest import create_source
+from .learn.feedback import FeedbackService
+from .learn.learner import Learner
+from .llm.context import ContextBuilder
+from .llm.gateway import LLMGateway
+from .qa.engine import QAEngine
+from .report.generator import ReportGenerator
+
+
+def _build(config_path: str | Path) -> "Context":
+    config = load_config(config_path)
+    # Resolve a relative workspace against the config file's directory (same rule
+    # as server.deps.build_state) so CLI runs are independent of the process CWD
+    # and land in the same workspace the web HMI uses.
+    if not config.workspace.is_absolute():
+        base = Path(config_path).resolve().parent
+        config.workspace = (base / config.workspace).resolve()
+    # Container deployments point the workspace at a mounted volume without
+    # editing the config: OXPECKER_WORKSPACE overrides whatever the file says.
+    import os
+    env_ws = os.environ.get("OXPECKER_WORKSPACE")
+    if env_ws:
+        config.workspace = Path(env_ws)
+    store = AssetStore(config.workspace)
+    for asset in config.assets:
+        store.ensure_asset(asset)
+    credential_vault = CredentialVault(
+        store.workspace / ".connector_credentials.enc",
+        os.environ.get("OXPECKER_CREDENTIAL_KEY"),
+    )
+    ctx = ContextBuilder(config, store)
+    gateway = LLMGateway(config, ctx)
+    report_gen = ReportGenerator(config, store, gateway)
+    learner = Learner(config, store, gateway)
+    qa = QAEngine(config, store, gateway)
+    feedback = FeedbackService(store)
+    return _Context(
+        config, store, gateway, report_gen, learner, qa, feedback, credential_vault,
+    )
+
+
+class _Context:
+    def __init__(self, config, store, gateway, report_gen, learner, qa, feedback,
+                 credential_vault):
+        self.config = config
+        self.store = store
+        self.gateway = gateway
+        self.report_gen = report_gen
+        self.learner = learner
+        self.qa = qa
+        self.feedback = feedback
+        self.credential_vault = credential_vault
+
+
+async def _cmd_setup(c: _Context) -> None:
+    for asset in c.config.assets:
+        p = c.store.ensure_asset(asset)
+        print(f"[setup] {asset.asset_id}: ASSET.md -> {p}")
+    print(f"[setup] workspace: {c.config.workspace}")
+
+
+async def _cmd_run_once(c: _Context, asset_id: str) -> None:
+    asset = c.config.asset(asset_id)
+    if asset is None:
+        raise SystemExit(f"unknown asset: {asset_id}")
+    src = _make_source(c, asset_id)
+    snap = await _supervisor(c).run_once(asset, src)
+    print(snap)
+
+
+def _make_source(c: _Context, asset_id: str):
+    from .config.model import SourceSpec
+    spec = next((s for s in c.config.sources if s.asset_id == asset_id), None)
+    if spec is None:
+        raise SystemExit(f"no source for asset {asset_id}")
+    try:
+        credentials = (
+            c.credential_vault.get(spec.credential_id)
+            if spec.credential_id else None
+        )
+        return create_source(spec, credentials=credentials)
+    except NotImplementedError as exc:
+        raise SystemExit(f"source not available: {exc}") from None
+    except (KeyError, RuntimeError, ValueError, OSError) as exc:
+        raise SystemExit(f"connector credentials unavailable: {exc}") from None
+
+
+def _supervisor(c: _Context) -> Supervisor:
+    return Supervisor(
+        config=c.config, store=c.store, gateway=c.gateway,
+        report_gen=c.report_gen, learner=c.learner,
+        # N9: pass the configured analysis-regime label (no hardcoded "degrade").
+        default_regime=c.config.analysis_regime,
+        credential_lookup=c.credential_vault.get,
+    )
+
+
+async def _cmd_monitor(c: _Context, asset_id: str) -> None:
+    asset = c.config.asset(asset_id)
+    if asset is None:
+        raise SystemExit(f"unknown asset: {asset_id}")
+    src = _make_source(c, asset_id)
+    sup = _supervisor(c)
+    await sup.gateway.astart()
+    try:
+        await sup.run_once(asset, src)
+        res = await sup.run_monitor(asset)
+        print(res.content or res.error or "(empty)")
+    finally:
+        await sup.stop()
+
+
+async def _cmd_report(c: _Context, asset_id: str) -> None:
+    asset = c.config.asset(asset_id)
+    sup = _supervisor(c)
+    await sup.gateway.astart()
+    try:
+        res = await sup.run_deep_report(asset)
+        print(json_dumps(res))
+    finally:
+        await sup.stop()
+
+
+async def _cmd_learn(c: _Context, asset_id: str | None) -> None:
+    sup = _supervisor(c)
+    await sup.gateway.astart()
+    try:
+        targets = [asset for asset in c.config.assets
+                   if asset_id is None or asset.asset_id == asset_id]
+        for asset in targets:
+            res = await sup.run_learn(asset)
+            print(f"[learn] {asset.asset_id}: {res.content[:200].strip() or res.error}")
+    finally:
+        await sup.stop()
+
+
+async def _cmd_ask(c: _Context, asset_id: str, question: str) -> None:
+    asset = c.config.asset(asset_id)
+    await c.gateway.astart()
+    try:
+        res = await c.qa.ask(asset, question)
+        print(res.content or res.error or "(empty)")
+    finally:
+        await c.gateway.aclose()
+
+
+async def _cmd_feedback(c: _Context, asset_id: str, note: str) -> None:
+    c.feedback.record(asset_id, note)
+    print(f"[feedback] recorded for {asset_id}")
+
+
+class _ServeAlertSink:
+    """Minimal duck-typed ``state`` for serve-mode alert derivation.
+
+    ``ingest_alert`` only touches ``state.store`` (alerts.jsonl ledger) — it
+    needs no bus, feedback service, or gateway, so headless serve mode can
+    share the exact same dedup/persist rules as the HMI without building an
+    AppState.
+    """
+
+    def __init__(self, store: AssetStore):
+        self.store = store
+
+
+async def _cmd_serve(c: _Context) -> None:
+    sup = _supervisor(c)
+    # monitor each asset every monitor_interval_s; deep-report/learn fire on
+    # their configured cron expressions (no more hardcoded daily)
+    import time
+    import datetime as _dt
+    await sup.start()
+    try:
+        while True:
+            for asset in c.config.assets:
+                try:
+                    snap = await sup.run_once(asset)
+                except Exception as exc:
+                    print(f"[serve] run err {asset.asset_id}: {exc}")
+                    continue
+                # P4: surface (rather than discard) a failed/empty window so the
+                # operator sees why a report may be missing.
+                if isinstance(snap, dict) and snap.get("error"):
+                    print(f"[serve] {asset.asset_id}: run not OK — {snap.get('error')} "
+                          f"(state={snap.get('status', snap.get('error'))})")
+                # 0.5.1: headless serve derives + persists alerts too — a Docker
+                # deployment without the HMI still needs the alerts.jsonl ledger
+                # (same dedup rule as the web loop) or a critical/offline asset
+                # would never raise an operator-visible alert.
+                if isinstance(snap, dict) and snap.get("asset_id"):
+                    try:
+                        from .server.alerts import ingest_alert
+                        alert = ingest_alert(_ServeAlertSink(c.store), asset.asset_id, snap)
+                        if alert:
+                            print(f"[serve] ALERT {asset.asset_id}: "
+                                  f"[{alert.get('subject')}] {alert.get('headline') or alert.get('reason')}")
+                    except Exception as exc:
+                        print(f"[serve] alert err {asset.asset_id}: {exc}")
+                await sup.run_due_jobs(asset, _dt.datetime.now(_dt.timezone.utc))
+            await asyncio.sleep(c.config.monitor_interval_s)
+    finally:
+        await sup.stop()
+
+
+async def _cmd_web(c: _Context, host: str | None, port: int | None,
+                   demo: bool = False) -> int:
+    """Serve the B/S human-machine interface (FastAPI + built SPA).
+
+    Rebuild the frontend first: `cd hmi && npm install && npm run build`.
+    Otherwise the API is served and `/` returns a hint pointing at the build dir.
+    """
+    import uvicorn
+    from .server.app import create_app, _DIST
+
+    app = create_app(c.config.defaults.get("_source_file", "config.json"),
+                     demo=demo or None)
+    bind_host = host or getattr(c.config, "hmi_host", "0.0.0.0")
+    bind_port = port or getattr(c.config, "hmi_port", 8000)
+    if not _DIST.exists():
+        print(f"[web] frontend not built; expected at {_DIST}")
+        print("[web]   cd hmi && npm install && npm run build")
+    print(f"[web] Oxpecker HMI -> http://{bind_host}:{bind_port}/  "
+          f"(api=/api, sse=/stream)")
+    cfg = uvicorn.Config(app, host=bind_host, port=bind_port, log_level="info")
+    server = uvicorn.Server(cfg)
+    await server.serve()
+    return 0
+
+
+def json_dumps(obj) -> str:
+    import json
+    return json.dumps(obj, ensure_ascii=False, indent=2)
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="oxpecker", description=__doc__)
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    def add(cmd, help_):
+        p = sub.add_parser(cmd, help=help_)
+        p.add_argument("config", type=Path)
+        return p
+
+    add("setup", "validate config & materialize ASSET.md").add_argument("--noop", action="store_true")
+    p = add("run", "pull+analyze+archive one window"); p.add_argument("asset")
+    p = add("monitor", "routine status"); p.add_argument("asset")
+    p = add("report", "deep report"); p.add_argument("asset")
+    p = add("learn", "learn pass"); p.add_argument("asset", nargs="?")
+    p = add("ask", "Q&A"); p.add_argument("asset"); p.add_argument("question")
+    p = add("feedback", "record feedback"); p.add_argument("asset"); p.add_argument("note")
+    add("serve", "run supervisor loop")
+    pw = add("web", "serve the B/S human-machine interface (FastAPI)")
+    pw.add_argument("--host", default=None)
+    pw.add_argument("--port", type=int, default=None)
+    pw.add_argument("--demo", action="store_true",
+                    help="force demo mode (MockGateway + seeded workspace)")
+
+    args = parser.parse_args(argv)
+    c = _build(args.config)
+
+    async def _dispatch() -> int:
+        if args.cmd == "setup":
+            await _cmd_setup(c)
+        elif args.cmd == "run":
+            await _cmd_run_once(c, args.asset)
+        elif args.cmd == "monitor":
+            await _cmd_monitor(c, args.asset)
+        elif args.cmd == "report":
+            await _cmd_report(c, args.asset)
+        elif args.cmd == "learn":
+            await _cmd_learn(c, getattr(args, "asset", None))
+        elif args.cmd == "ask":
+            await _cmd_ask(c, args.asset, args.question)
+        elif args.cmd == "feedback":
+            await _cmd_feedback(c, args.asset, args.note)
+        elif args.cmd == "serve":
+            await _cmd_serve(c)
+        elif args.cmd == "web":
+            return await _cmd_web(c, host=args.host, port=args.port,
+                                  demo=getattr(args, "demo", False))
+        return 0
+
+    try:
+        return asyncio.run(_dispatch())
+    except KeyboardInterrupt:
+        print("interrupted")
+        return 130
+
+
+if __name__ == "__main__":
+    sys.exit(main())
