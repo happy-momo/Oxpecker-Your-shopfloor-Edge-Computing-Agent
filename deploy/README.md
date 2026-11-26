@@ -10,7 +10,7 @@
 ## 1. 准备配置
 
 ```bash
-cp oxpecker/config.sample.json config.json
+cp ../config.sample.json config.json
 # 编辑：assets / metrics / sources / providers（在线模型或离线 Ollama）
 ```
 
@@ -23,7 +23,7 @@ cp oxpecker/config.sample.json config.json
 ## 2. Docker / Compose
 
 ```bash
-cd oxpecker/deploy
+cd deploy
 cp ../config.sample.json config.json && vi config.json
 docker compose up -d --build
 ```
@@ -36,17 +36,27 @@ docker compose up -d --build
 ## 3. systemd 裸机
 
 ```bash
+# 将仓库安装在 /opt/oxpecker（与 oxpecker.service 的 WorkingDirectory 一致）
+sudo git clone https://github.com/happy-momo/Oxpecker-Your-shopfloor-Edge-Computing-Agent.git /opt/oxpecker
+sudo chown -R "$USER":"$USER" /opt/oxpecker
+
 # 一次性安装（建议专用 venv）
 python3.11 -m venv /opt/oxpecker/.venv
-/opt/oxpecker/.venv/bin/pip install -e /path/to/repo/oxpecker
+/opt/oxpecker/.venv/bin/pip install -e /opt/oxpecker
+
+# 在部署机或构建机编译 HMI 静态文件；运行时无需 Node.js
+cd /opt/oxpecker/hmi
+npm ci && npm run build
+cd /opt/oxpecker
 
 # 目录约定
 sudo mkdir -p /etc/oxpecker /var/lib/oxpecker
-sudo cp config.json /etc/oxpecker/
+sudo cp /opt/oxpecker/config.sample.json /etc/oxpecker/config.json
+# 编辑 /etc/oxpecker/config.json，设置资产、数据源、Provider 和 hmi_pin
 sudo useradd -r -s /usr/sbin/nologin oxpecker
 sudo chown -R oxpecker /var/lib/oxpecker
 
-sudo cp oxpecker/deploy/oxpecker.service /etc/systemd/system/
+sudo cp /opt/oxpecker/deploy/oxpecker.service /etc/systemd/system/
 sudo systemctl daemon-reload && sudo systemctl enable --now oxpecker
 journalctl -u oxpecker -f          # 跟日志
 ```

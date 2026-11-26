@@ -19,8 +19,8 @@ Open an issue with:
 ## Development setup
 
 ```bash
-git clone https://github.com/happy-momo/oxpecker.git
-cd oxpecker
+git clone https://github.com/happy-momo/Oxpecker-Your-shopfloor-Edge-Computing-Agent.git
+cd Oxpecker-Your-shopfloor-Edge-Computing-Agent
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e .
 pip install pytest pytest-asyncio
@@ -33,7 +33,7 @@ connector + mock gateway).
 For HMI work:
 
 ```bash
-cd hmi && npm install && npm run build
+cd hmi && npm ci && npm run build
 # dev server with hot reload:
 npm run dev
 ```
